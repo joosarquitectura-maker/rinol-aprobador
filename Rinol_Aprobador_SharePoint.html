@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>RINOL v17 - Terminal de Aprobación Final</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <style>
+        .glow-blue { shadow-lg shadow-blue-500/20 }
+        .glow-emerald { shadow-lg shadow-emerald-500/20 }
+    </style>
+</head>
+<body class="bg-[#030303] text-slate-300 p-4 font-sans h-screen overflow-hidden text-sm">
+
+    <div class="max-w-7xl mx-auto h-full flex flex-col">
+        <!-- Header Superior -->
+        <div class="flex justify-between items-center mb-4 border-b border-zinc-800 pb-3 shrink-0">
+            <div>
+                <h1 class="text-2xl font-black text-white italic uppercase tracking-tighter">Rinol Pisocreto S.A.</h1>
+                <p class="text-[10px] text-blue-500 font-bold uppercase tracking-[0.3em]">v17.0 | Módulo de Aprobación Final</p>
+            </div>
+            <div class="flex gap-4 items-center">
+                <div class="bg-zinc-900 px-4 py-2 rounded-xl border border-zinc-800">
+                    <input type="file" id="pdfInput" accept=".pdf" class="text-xs text-zinc-500 file:bg-blue-600 file:text-white file:border-0 file:px-3 file:py-1 file:rounded-md file:mr-3 cursor-pointer"/>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-6 flex-grow min-h-0 pb-4">
+            
+            <!-- COLUMNA IZQUIERDA: DATOS OC -->
+            <div class="col-span-3 flex flex-col gap-4">
+                <div class="bg-zinc-950 rounded-[2rem] border-2 border-zinc-800 p-6 flex flex-col overflow-y-auto grow shadow-2xl">
+                    <h2 class="text-[10px] font-black uppercase tracking-widest text-blue-400 flex items-center gap-2 mb-6">
+                        <span class="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></span> Datos de la Orden
+                    </h2>
+                    <div id="panelIzquierdo" class="space-y-5">
+                        <div class="text-zinc-600 italic text-xs text-center mt-20">Esperando archivo...</div>
+                    </div>
+                </div>
+
+                <!-- SECCIÓN DE ACCIONES (El corazón de tu flujo) -->
+                <div id="seccionAcciones" class="bg-zinc-900/50 rounded-[1.5rem] border border-zinc-800 p-4 shrink-0 hidden">
+                    <p class="text-[9px] font-bold text-zinc-500 uppercase mb-3 text-center tracking-widest">Despachar Aprobación</p>
+                    <div id="botonesContainer" class="flex flex-col gap-2">
+                        <!-- Botones dinámicos según C. Costo -->
+                    </div>
+                    <!-- Zona de estado del envío -->
+                    <div id="estadoEnvio" class="hidden mt-3 px-3 py-2 rounded-lg text-[10px] font-bold text-center"></div>
+                </div>
+            </div>
+
+            <!-- COLUMNA DERECHA: TABLA Y TOTALES -->
+            <div class="col-span-9 bg-zinc-950 rounded-[2rem] border-2 border-zinc-800 p-6 shadow-2xl flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-[10px] font-black uppercase tracking-widest text-amber-500 flex items-center gap-2">
+                        <span class="w-2 h-2 bg-amber-500 rounded-full"></span> Detalle de Materiales
+                    </h2>
+                </div>
+                
+                <div class="grid grid-cols-12 gap-4 px-4 py-2 bg-zinc-900/80 rounded-t-xl text-[9px] font-black uppercase text-zinc-500 border-x border-t border-zinc-800">
+                    <div class="col-span-1">Código</div>
+                    <div class="col-span-4">Material</div>
+                    <div class="col-span-1 text-center">Cant.</div>
+                    <div class="col-span-1 text-center">Unidad</div>
+                    <div class="col-span-2 text-right">Vr. Unitario</div>
+                    <div class="col-span-3 text-right">Vr. Parcial</div>
+                </div>
+
+                <div id="panelMateriales" class="flex-grow overflow-y-auto bg-zinc-900/20 border-x border-zinc-800 p-2 space-y-1"></div>
+
+                <div id="panelTotales" class="grid grid-cols-4 gap-4 border-t border-zinc-800 pt-4 bg-zinc-950 rounded-b-xl"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const pdfjs = window['pdfjs-dist/build/pdf'];
+        pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+
+        // --- CONFIGURACIÓN SHAREPOINT ---
+        // Al correr dentro del mismo sitio de SP, usamos la ruta relativa.
+        // Esto funciona sin importar desde qué biblioteca del sitio se abra el archivo.
+        const SP_SITE_PATH = "/sites/Operaciones";
+        const SP_LIST_NAME = "Disparador_OC";
+
+        let dataExtraida = null;
+
+        const limpiar = (t) => t.replace(/[\r\n\\]/g, '').trim();
+        const fmtMoneda = (str) => {
+            if (!str || str === "---") return "---";
+            const num = parseFloat(str.replace(/[^\d.-]/g, ''));
+            return isNaN(num) ? str : new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(num);
+        };
+
+        document.getElementById('pdfInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+            let tokens = [];
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const text = await page.getTextContent();
+                text.items.forEach(item => {
+                    const clean = limpiar(item.str);
+                    if(clean) tokens.push(clean);
+                });
+            }
+            procesarOC(tokens);
+        });
+
+        function procesarOC(arr) {
+            const findValue = (label) => {
+                const idx = arr.findIndex(t => t.toLowerCase().includes(label.toLowerCase()));
+                return idx !== -1 ? arr[idx + 1] : "---";
+            };
+
+            // Extracción Core
+            let provIdx = arr.findIndex(t => t.toLowerCase().includes("nombre / razon"));
+            let proveedor = (provIdx !== -1) ? (arr[provIdx + 1].includes("Social") ? arr[provIdx + 2] : arr[provIdx + 1]) : "---";
+            const nit = arr.find(t => /^\d{8,11}-\d$/.test(t)) || "---";
+            const oc = findValue("COSECUTIVO No");
+            const ccIdx = arr.findIndex(t => t.toLowerCase().includes("c. costo"));
+            const cCosto = ccIdx !== -1 ? arr[ccIdx + 1] : "---";
+            
+            // Fecha Solicitud con radio amplio
+            let fechaSol = "---";
+            ["fecha solicitud", "revisión n°", "revision n°"].forEach(lbl => {
+                const idx = arr.findIndex(t => t.toLowerCase().includes(lbl));
+                if (idx !== -1 && fechaSol === "---") {
+                    for (let k = 1; k <= 5; k++) {
+                        if (arr[idx+k] && /\d+ de [a-zA-Z]+ \d+/.test(arr[idx+k])) { fechaSol = arr[idx+k]; break; }
+                    }
+                }
+            });
+
+            // Totales
+            const findDinero = (label) => {
+                // Buscamos de atrás para adelante
+                for (let i = arr.length - 1; i >= 0; i--) {
+                    if (arr[i].toLowerCase().includes(label.toLowerCase())) {
+                        for(let k = 1; k <= 6; k++) {
+                            if (arr[i+k] && (arr[i+k].includes('$') || /^[\d,.]+$/.test(arr[i+k]) && arr[i+k].length > 4)) {
+                                return arr[i+k];
+                            }
+                        }
+                    }
+                }
+                return "---";
+            };
+            const vBase = findDinero("subtotal") !== "---" ? findDinero("subtotal") : findDinero("base");
+            const vIva = findDinero("iva");
+            const vTotal = findDinero("valor total") !== "---" ? findDinero("valor total") : findDinero("total");
+
+            dataExtraida = { proveedor, nit, oc, cCosto, fechaSol, vBase, vIva, vTotal };
+            renderTodo(dataExtraida, arr);
+        }
+
+        function renderTodo(data, arr) {
+            // Panel Izquierdo
+            document.getElementById("panelIzquierdo").innerHTML = `
+                <div><p class="text-[9px] font-bold text-zinc-500 uppercase">Proveedor</p><p class="text-sm text-white font-black border-l-2 border-blue-500 pl-2 uppercase">${data.proveedor}</p></div>
+                <div><p class="text-[9px] font-bold text-zinc-500 uppercase">NIT</p><p class="text-xs text-zinc-400 font-bold pl-3">${data.nit}</p></div>
+                <div><p class="text-[9px] font-bold text-zinc-500 uppercase">OC No.</p><p class="text-xl text-blue-400 font-black pl-3">${data.oc}</p></div>
+                <div><p class="text-[9px] font-bold text-zinc-500 uppercase">Centro de Costos</p><p class="text-lg text-zinc-100 font-bold pl-3">${data.cCosto}</p></div>
+                <div class="pt-2 border-t border-zinc-900"><p class="text-[9px] font-bold text-zinc-500 uppercase">Fecha Solicitud</p><p class="text-xs text-emerald-500 font-bold pl-3 uppercase">${data.fechaSol}</p></div>
+            `;
+
+            // Acciones Dinámicas
+            const seccion = document.getElementById("seccionAcciones");
+            const btnContainer = document.getElementById("botonesContainer");
+            seccion.classList.remove("hidden");
+            
+            let esObra = data.cCosto.includes("2607") || !data.cCosto.toLowerCase().includes("admin");
+            
+            btnContainer.innerHTML = `
+                <button onclick="copiarResumen()" class="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-[10px] font-bold transition-all mb-1 border border-zinc-700">
+                    📋 COPIAR RESUMEN PARA CHAT
+                </button>
+                ${esObra ? `
+                    <button id="btnEnviar" onclick="enviarDestino('OPERACIONES')" class="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-black shadow-lg shadow-blue-900/40 transition-all flex items-center justify-center gap-2">
+                        🚀 ENVIAR A OPERACIONES
+                    </button>
+                ` : `
+                    <button id="btnEnviar" onclick="enviarDestino('FINANZAS')" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-black shadow-lg shadow-indigo-900/40 transition-all flex items-center justify-center gap-2">
+                        💼 ENVIAR A FINANZAS
+                    </button>
+                `}
+            `;
+
+            // Materiales (Simple list render)
+            const pMat = document.getElementById("panelMateriales");
+            pMat.innerHTML = "<div class='text-center py-10 text-zinc-600'>Procesando items...</div>";
+            // Re-use items logic from v16...
+            renderItems(arr);
+
+            // Totales
+            document.getElementById("panelTotales").innerHTML = `
+                <div class="bg-zinc-900/50 p-2 rounded-lg text-center border border-zinc-800">
+                    <p class="text-[8px] text-zinc-500 font-bold uppercase">Vr. Base</p>
+                    <p class="text-xs text-zinc-300 font-bold">${fmtMoneda(data.vBase)}</p>
+                </div>
+                <div class="bg-emerald-900/20 p-2 rounded-lg text-center border border-emerald-800/30">
+                    <p class="text-[8px] text-emerald-500 font-bold uppercase">Valor IVA</p>
+                    <p class="text-xs text-emerald-400 font-bold">${fmtMoneda(data.vIva)}</p>
+                </div>
+                <div class="bg-blue-600 p-2 rounded-lg text-center col-span-2 shadow-lg shadow-blue-900/20">
+                    <p class="text-[8px] text-blue-100 font-bold uppercase">Vr. Total</p>
+                    <p class="text-xl text-white font-black">${fmtMoneda(data.vTotal)}</p>
+                </div>
+            `;
+        }
+
+        function renderItems(arr) {
+            const unidades = ["KG", "UN", "UND", "ML", "MT", "GL", "GAL", "M3", "M2", "PAQ", "ROL", "LT"];
+            let html = "";
+            for (let i = 0; i < arr.length; i++) {
+                if (unidades.includes(arr[i].toUpperCase())) {
+                    const qty = arr[i - 1];
+                    if (qty && /^[\d,.]+$/.test(qty)) {
+                        let vrU = "---", vrP = "---";
+                        for(let h=1; h<=6; h++) {
+                            if(arr[i+h] && (arr[i+h].includes('$') || /[\d,]{5,}/.test(arr[i+h]))) {
+                                if(vrU === "---") vrU = arr[i+h]; else if(vrP === "---") vrP = arr[i+h];
+                            }
+                        }
+                        let cod = "---", nom = "Material";
+                        for (let j=i-3; j>=i-15; j--) {
+                            if (/^\d{3,7}$/.test(arr[j])) { cod = arr[j]; nom = arr.slice(j+1, i-2).join(" "); break; }
+                        }
+                        html += `<div class="grid grid-cols-12 gap-4 bg-zinc-900/40 p-2 rounded-lg border border-zinc-800/50 items-center text-[10px]">
+                            <div class="col-span-1 font-bold text-amber-600">${cod}</div>
+                            <div class="col-span-4 font-medium text-zinc-300 uppercase truncate">${nom}</div>
+                            <div class="col-span-1 text-center font-bold">${qty}</div>
+                            <div class="col-span-1 text-center text-zinc-500">${arr[i]}</div>
+                            <div class="col-span-2 text-right text-zinc-400">${fmtMoneda(vrU)}</div>
+                            <div class="col-span-3 text-right font-black text-white">${fmtMoneda(vrP)}</div>
+                        </div>`;
+                    }
+                }
+            }
+            document.getElementById("panelMateriales").innerHTML = html;
+        }
+
+        function copiarResumen() {
+            const text = `ORDEN DE COMPRA: ${dataExtraida.oc}\nProveedor: ${dataExtraida.proveedor}\nC. Costo: ${dataExtraida.cCosto}\nValor Total: ${dataExtraida.vTotal}\nEstado: APROBADO POR GERENCIA`;
+            navigator.clipboard.writeText(text);
+            alert("Resumen copiado al portapapeles");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // ENVÍO NATIVO A SHAREPOINT REST API (same-origin)
+        // ─────────────────────────────────────────────────────────────────────
+
+        function setEstado(msg, tipo) {
+            const el = document.getElementById("estadoEnvio");
+            if (tipo === 'loading') {
+                el.className = "mt-3 px-3 py-2 rounded-lg text-[10px] font-bold text-center bg-zinc-800 border border-zinc-700 text-zinc-300";
+            } else if (tipo === 'ok') {
+                el.className = "mt-3 px-3 py-2 rounded-lg text-[10px] font-bold text-center bg-emerald-900/40 border border-emerald-700/50 text-emerald-400";
+            } else {
+                el.className = "mt-3 px-3 py-2 rounded-lg text-[10px] font-bold text-center bg-red-900/40 border border-red-700/50 text-red-400";
+            }
+            el.textContent = msg;
+        }
+
+        // Construye la base del sitio SP a partir del origen actual del navegador.
+        // Al estar alojado dentro del mismo sitio, origin + path = URL correcta
+        // sin hardcodear el dominio, lo que hace el archivo portable.
+        function getSiteUrl() {
+            return window.location.origin + SP_SITE_PATH;
+        }
+
+        // Obtiene el FormDigestValue necesario para toda escritura en SP REST API.
+        // SP lo usa como token CSRF — sin él todas las escrituras devuelven 403.
+        async function getFormDigest() {
+            const res = await fetch(`${getSiteUrl()}/_api/contextinfo`, {
+                method: "POST",
+                headers: {
+                    "Accept": "application/json;odata=nometadata",
+                    "Content-Type": "application/json;odata=nometadata"
+                },
+                credentials: "include"
+            });
+            if (!res.ok) {
+                throw new Error(`No se pudo obtener el token de seguridad (HTTP ${res.status}). ¿Estás autenticado en SharePoint?`);
+            }
+            const data = await res.json();
+            // Con nometadata la respuesta es plana: data.FormDigestValue
+            return data.FormDigestValue;
+        }
+
+        async function enviarDestino(destino) {
+            if (!dataExtraida) {
+                setEstado("⚠️ No hay datos cargados.", "error");
+                return;
+            }
+
+            const btn = document.getElementById("btnEnviar");
+            const labelOriginal = destino === "OPERACIONES" ? "🚀 ENVIAR A OPERACIONES" : "💼 ENVIAR A FINANZAS";
+            if (btn) {
+                btn.disabled = true;
+                btn.classList.add("opacity-50", "cursor-not-allowed");
+                btn.textContent = "⏳ Enviando...";
+            }
+            setEstado("⏳ Paso 1/2: Obteniendo token de seguridad...", "loading");
+
+            try {
+                // ── PASO 1: FormDigest ─────────────────────────────────────────
+                const formDigest = await getFormDigest();
+                console.log("FormDigestValue obtenido correctamente.");
+
+                // ── PASO 2: Crear ítem ─────────────────────────────────────────
+                setEstado("⏳ Paso 2/2: Guardando en lista SharePoint...", "loading");
+
+                const destinoLabel = destino === "OPERACIONES" ? "Operaciones" : "Finanzas";
+
+                // Payload plano sin __metadata — compatible con odata=nometadata.
+                // Los nombres de campo deben coincidir EXACTAMENTE con los nombres
+                // internos de las columnas creadas en la lista Disparador_OC.
+                const payload = {
+                    Title:        String(dataExtraida.oc),
+                    Payload_JSON: JSON.stringify(dataExtraida),
+                    Destino:      destinoLabel
+                };
+
+                const listUrl = `${getSiteUrl()}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items`;
+
+                const postRes = await fetch(listUrl, {
+                    method: "POST",
+                    headers: {
+                        "Accept":         "application/json;odata=nometadata",
+                        "Content-Type":   "application/json;odata=nometadata",
+                        "X-RequestDigest": formDigest
+                    },
+                    credentials: "include",
+                    body: JSON.stringify(payload)
+                });
+
+                if (!postRes.ok) {
+                    // Capturamos el cuerpo del error para que aparezca en consola
+                    // y en el mensaje de alerta — facilita el diagnóstico en campo.
+                    let detalle = "";
+                    try { detalle = await postRes.text(); } catch(_) {}
+                    console.error("Error SP al crear ítem:", postRes.status, detalle);
+                    throw new Error(`SharePoint rechazó el ítem (HTTP ${postRes.status}). Detalle en consola (F12).`);
+                }
+
+                const result = await postRes.json();
+                // Con nometadata el ID viene directo en la raíz del objeto
+                const idCreado = result.Id ?? result.ID ?? "—";
+                console.log("Ítem creado. ID SharePoint:", idCreado, result);
+
+                setEstado(`✅ Guardado en ${destinoLabel} · ID: ${idCreado}`, "ok");
+                alert(`✅ OC ${dataExtraida.oc} enviada correctamente a ${destinoLabel}.\nID del registro en SharePoint: ${idCreado}`);
+
+            } catch (err) {
+                console.error("enviarDestino() error:", err);
+                setEstado(`❌ ${err.message}`, "error");
+                alert(`Error al enviar:\n\n${err.message}`);
+
+                if (btn) {
+                    btn.disabled = false;
+                    btn.classList.remove("opacity-50", "cursor-not-allowed");
+                    btn.textContent = labelOriginal;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
